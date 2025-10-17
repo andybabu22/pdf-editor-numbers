@@ -1,21 +1,21 @@
-# Smart PDF Replacer — Local Only (Next.js)
+# Smart PDF Replacer — Local Only (V3)
 
-**No AI, no server-side parsing**. All PDF processing happens in the browser:
-- **Presentable (default)**: keeps the original heading exactly; cleans & reflows the remaining text; replaces all phone numbers.
-- **Keep Layout**: overlays replacements in place while preserving the page layout.
+**One-time fix for PDF.js worker error**.
 
-### Deploy (GitHub + Vercel)
-1. Upload this repo to GitHub.
-2. Import into Vercel → Next.js will auto-detect.
-3. Deploy. (No env vars needed.)
+## Why you saw this
+PDF.js >= 4 uses an ES module worker. Loading it from a CDN (`unpkg`) can fail in production (Vercel) with:
+> Setting up fake worker failed: Failed to fetch dynamically imported module...
 
-### Libraries
-- `pdfjs-dist` (client) for text extraction and glyph positions
-- `pdf-lib` for in-place overlays & for rebuilding PDFs
-- `jszip` for batch download
-- Tailwind for simple UI; Framer Motion for small animation
+## This version fixes it
+- Uses the **legacy build**: `pdfjs-dist/legacy/build/pdf` (compatible with classic worker).
+- Copies worker files into **/public** at install time:
+  - `scripts/copy-pdfjs-worker.js` (runs in `postinstall`)
+  - Sets `GlobalWorkerOptions.workerSrc = "/pdf.worker.min.js"`
+- No AI, no server parsing. All PDF work is client-side.
 
-### Notes
-- We set the PDF.js worker via CDN to avoid the "GlobalWorkerOptions.workerSrc" error.
-- The `/api/fetch` route is a tiny proxy to bypass CORS when fetching third-party PDFs.
-- If you see CORS blocks from certain hosts, try downloading the PDF to your own storage first.
+## Deploy
+1. Push to GitHub.
+2. Import into Vercel.
+3. Deploy. (The `postinstall` will copy the worker into `/public` automatically.)
+
+If you still get a build using cached artifacts, use **Redeploy → Clear build cache** on Vercel.

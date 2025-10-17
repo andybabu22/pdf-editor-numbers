@@ -33,12 +33,10 @@ function normalizeWeird(text) {
 
 // ---- PDF.js helpers (client) ----
 async function loadPdfJs() {
-  const pdfjsMod = await import("pdfjs-dist");
-  const pdfjs = pdfjsMod.default?.getDocument ? pdfjsMod.default : pdfjsMod;
-  const version = pdfjs.version || pdfjsMod.version || "4.7.76";
+  // Use LEGACY build to avoid ESM remote worker hassles
+  const pdfjs = (await import("pdfjs-dist/legacy/build/pdf")).default ?? await import("pdfjs-dist/legacy/build/pdf");
   if (pdfjs.GlobalWorkerOptions) {
-    // Use .js (not .mjs) for broad compatibility
-    pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${version}/build/pdf.worker.min.js`;
+    pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.js"; // served from /public by postinstall copy
   }
   return pdfjs;
 }
@@ -83,13 +81,10 @@ const bytesToDataUrl = (mime, bytes) => {
   return `data:${mime};base64,${base64}`;
 };
 
-// Stricter bullet detector (dash+space OR bullet glyph)
-// (Avoid flagging "1-888..." as bullets)
 function isBulletLine(line) {
   return /^([•·*]\s+|-\s+)/.test(line);
 }
 
-// Choose a sane heading (never a giant paragraph line)
 function chooseHeading(rawLines) {
   const candidates = rawLines.slice(0, 25).map(s => s.trim()).filter(Boolean);
   for (const s of candidates) {
@@ -147,7 +142,6 @@ export default function Home() {
       const viewport = jsPage.getViewport({ scale: 1.0 });
       const content = await jsPage.getTextContent({ disableCombineTextItems: false });
 
-      // group into lines
       const lines = [];
       for (const it of content.items) {
         const [, , c, d, e, f] = it.transform;
@@ -161,7 +155,6 @@ export default function Home() {
       lines.sort((a,b)=>b.yRef - a.yRef);
       lines.forEach(L => L.items.sort((a,b)=>a.x - b.x));
 
-      // build spans
       for (const L of lines) {
         let text = ""; const spans = [];
         for (let idx = 0; idx < L.items.length; idx++) {
@@ -227,15 +220,12 @@ export default function Home() {
     const rawLines = allText.split(/\r?\n/).map(s => s.trim());
     const title = chooseHeading(rawLines);
 
-    // Body = everything after the heading occurrence, else whole text minus first non-empty
     const firstIdx = rawLines.findIndex(s => s.trim() === title);
     const bodyRaw = (firstIdx >= 0 ? rawLines.slice(firstIdx + 1) : rawLines.slice(1)).join("\n");
 
-    // Normalize -> vanity to digits -> replace numbers
     let body = convertVanityToDigits(normalizeWeird(bodyRaw));
     body = body.replace(PHONE_RE, newNumber);
 
-    // Build ordered blocks (preserve order)
     const blocks = [];
     let para = [];
     const flushPara = () => { if (para.length) { blocks.push({ type: "para", text: para.join(" ") }); para = []; } };
@@ -251,14 +241,12 @@ export default function Home() {
     }
     flushPara();
 
-    // Create output PDF
     const out = await PDFDocument.create();
     out.registerFontkit(fontkit);
     const fontRes = await fetch(FONT_URL, { cache: "no-store" });
     const fontBytes = new Uint8Array(await fontRes.arrayBuffer());
     const font = await out.embedFont(fontBytes, { subset: true });
 
-    // Try to match source page size; fallback to Letter
     let pageW = 612, pageH = 792;
     try {
       const srcDoc = await PDFDocument.load(srcBytes);
@@ -271,8 +259,6 @@ export default function Home() {
     const margin = 36;
     const bodySize = 11;
     const lineH = 16;
-
-    // Safe top baseline so title never clips
     let cursorY = pageH - margin - 4;
 
     const widthOf = (t, size) => font.widthOfTextAtSize(t, size);
@@ -283,7 +269,6 @@ export default function Home() {
       }
     };
 
-    // Soft-break long tokens (no natural spaces) at measured width
     const breakLongToken = (token, size, maxWidth) => {
       const pieces = [];
       let cur = "";
@@ -299,16 +284,12 @@ export default function Home() {
     const drawWrappedAt = (xLeft, text, size, extraAfter = 6, customLH) => {
       const lh = customLH || lineH;
       const maxWidth = pageW - xLeft - margin;
-
-      // Tokenize and break overly-long tokens
       const rawTokens = text.split(/\s+/);
       const tokens = [];
       for (const tok of rawTokens) {
         if (widthOf(tok, size) > maxWidth) tokens.push(...breakLongToken(tok, size, maxWidth));
         else tokens.push(tok);
       }
-
-      // Build lines
       let cur = "";
       const lines = [];
       for (const w of tokens) {
@@ -317,8 +298,6 @@ export default function Home() {
         else { if (cur) lines.push(cur); cur = w; }
       }
       if (cur) lines.push(cur);
-
-      // Ensure room & draw
       const need = lines.length * lh;
       ensure(need);
       for (const ln of lines) {
@@ -334,21 +313,17 @@ export default function Home() {
       const bulletCol = 10;
       const xBullet = margin;
       const xText = margin + bulletCol + bulletGap;
-
       ensure(lineH);
       page.drawText("•", { x: xBullet, y: cursorY, size: bulletSize, font });
       drawWrappedAt(xText, text, bodySize, 4);
     };
 
-    // Title: shrink-to-fit first, else wrap at min size with generous line-height
     const drawTitle = (titleText) => {
       const maxWidth = pageW - margin * 2;
       const maxSize = 26;
       const minSize = 14;
-
       let size = maxSize;
       while (size > minSize && widthOf(titleText, size) > maxWidth) size -= 1;
-
       if (widthOf(titleText, size) <= maxWidth) {
         ensure(size + 12);
         page.drawText(titleText, { x: margin, y: cursorY, size, font, maxWidth });
@@ -358,7 +333,6 @@ export default function Home() {
       }
     };
 
-    // Draw title then ordered blocks
     drawTitle(title);
     for (const b of blocks) {
       if (b.type === "bullet") drawBullet(b.text);
@@ -369,10 +343,9 @@ export default function Home() {
     return bytesToDataUrl("application/pdf", outBytes);
   }
 
-  // ---- Main handler ----
   const handleProcess = async () => {
     setError(""); setResults([]); setProgressDone(0); setOpenPreview({});
-    const urls = pdfUrls.split(/\n|,/).map(u => u.trim()).filter(Boolean);
+    const urls = pdfUrls.split(/\\n|,/).map(u => u.trim()).filter(Boolean);
     if (!urls.length) { setError("Please enter at least one PDF URL."); return; }
     if (!replaceNumber.trim()) { setError("Please enter the replacement phone number."); return; }
 
@@ -382,7 +355,6 @@ export default function Home() {
     for (let i = 0; i < urls.length; i++) {
       const url = urls[i];
       try {
-        // CORS-safe via tiny proxy
         const proxied = `/api/fetch?url=${encodeURIComponent(url)}`;
         const r = await fetch(proxied);
         if (!r.ok) throw new Error(`Fetch failed (${r.status})`);
@@ -416,7 +388,6 @@ export default function Home() {
     setLoading(false);
   };
 
-  // ZIP download
   const downloadAllZip = async () => {
     const zip = new JSZip();
     const folder = zip.folder("processed_pdfs");

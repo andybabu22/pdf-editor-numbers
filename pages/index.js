@@ -7,7 +7,7 @@ import JSZip from "jszip";
 const FONT_URL =
   "https://raw.githubusercontent.com/GreatWizard/notosans-fontface/master/fonts/NotoSans-Regular.ttf";
 
-// Robust phone detector
+// Robust phone detector: digits + many separators/parens
 const PHONE_RE = /(\+?\d[\d\s\-()./\\|•·–—_⇄⇋]{7,}\d)/g;
 
 // Vanity 1-800-FLOWERS -> digits
@@ -22,12 +22,12 @@ function convertVanityToDigits(s) {
   );
 }
 
-// Normalize odd separators
+// Normalize odd separators & spacing
 function normalizeWeird(text) {
   return text
     .replace(/[\u200B-\u200D\uFEFF\u00AD]/g, "") // zero-width + soft hyphen
     .replace(/[⇄⇋•·–—_]+/g, "-")                 // unify odd separators
-    .replace(/\s{2,}/g, " ")
+    .replace(/\s{2,}/g, " ")                      // squeeze spaces
     .trim();
 }
 
@@ -37,7 +37,8 @@ async function loadPdfJs() {
   const pdfjs = pdfjsMod.default?.getDocument ? pdfjsMod.default : pdfjsMod;
   const version = pdfjs.version || pdfjsMod.version || "4.7.76";
   if (pdfjs.GlobalWorkerOptions) {
-    pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${version}/build/pdf.worker.min.mjs`;
+    // Use .js (not .mjs) for broad compatibility
+    pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${version}/build/pdf.worker.min.js`;
   }
   return pdfjs;
 }
@@ -82,22 +83,21 @@ const bytesToDataUrl = (mime, bytes) => {
   return `data:${mime};base64,${base64}`;
 };
 
-// Stricter bullet detector (dash+space OR leading bullet glyph)
-// Avoids treating phone numbers (1-888…) as bullets.
+// Stricter bullet detector (dash+space OR bullet glyph)
+// (Avoid flagging "1-888..." as bullets)
 function isBulletLine(line) {
   return /^([•·*]\s+|-\s+)/.test(line);
 }
 
-// Pick a clean heading candidate (never a giant “paragraph” line)
+// Choose a sane heading (never a giant paragraph line)
 function chooseHeading(rawLines) {
   const candidates = rawLines.slice(0, 25).map(s => s.trim()).filter(Boolean);
   for (const s of candidates) {
     const letters = (s.match(/[A-Za-z]/g) || []).length;
     const digits  = (s.match(/\d/g) || []).length;
     const len = s.length;
-    if (len >= 8 && len <= 120 && letters > digits * 2) return s;
+    if (len >= 8 && len <= 140 && letters > digits * 2) return s;
   }
-  // Fall back: split first non-empty line at obvious separators
   const first = candidates[0] || "Document";
   const parts = first.split(/\s[-–—:|]\s| - | — | : /).filter(Boolean);
   return (parts[0] || first).slice(0, 140);
@@ -214,7 +214,7 @@ export default function Home() {
     return bytesToDataUrl("application/pdf", out);
   }
 
-  // ---- Mode B: Presentable (title safe + ordered bullets) ----
+  // ---- Mode B: Presentable (safe title + ordered bullets) ----
   async function processPresentableClient(pdfArrayBuffer, newNumber) {
     const pdfLibMod = await import("pdf-lib");
     const fontkitMod = await import("@pdf-lib/fontkit");
@@ -235,7 +235,7 @@ export default function Home() {
     let body = convertVanityToDigits(normalizeWeird(bodyRaw));
     body = body.replace(PHONE_RE, newNumber);
 
-    // Build ordered blocks (preserve original order)
+    // Build ordered blocks (preserve order)
     const blocks = [];
     let para = [];
     const flushPara = () => { if (para.length) { blocks.push({ type: "para", text: para.join(" ") }); para = []; } };
@@ -272,8 +272,8 @@ export default function Home() {
     const bodySize = 11;
     const lineH = 16;
 
-    // Keep a safe top margin so title never clips:
-    let cursorY = pageH - margin - 4; // top baseline below the top margin
+    // Safe top baseline so title never clips
+    let cursorY = pageH - margin - 4;
 
     const widthOf = (t, size) => font.widthOfTextAtSize(t, size);
     const ensure = (need) => {
@@ -283,7 +283,7 @@ export default function Home() {
       }
     };
 
-    // Soft break very long tokens (no natural spaces) at measured widths
+    // Soft-break long tokens (no natural spaces) at measured width
     const breakLongToken = (token, size, maxWidth) => {
       const pieces = [];
       let cur = "";
@@ -299,12 +299,16 @@ export default function Home() {
     const drawWrappedAt = (xLeft, text, size, extraAfter = 6, customLH) => {
       const lh = customLH || lineH;
       const maxWidth = pageW - xLeft - margin;
+
+      // Tokenize and break overly-long tokens
       const rawTokens = text.split(/\s+/);
       const tokens = [];
       for (const tok of rawTokens) {
         if (widthOf(tok, size) > maxWidth) tokens.push(...breakLongToken(tok, size, maxWidth));
         else tokens.push(tok);
       }
+
+      // Build lines
       let cur = "";
       const lines = [];
       for (const w of tokens) {
@@ -314,7 +318,210 @@ export default function Home() {
       }
       if (cur) lines.push(cur);
 
+      // Ensure room & draw
       const need = lines.length * lh;
       ensure(need);
       for (const ln of lines) {
-        page.drawText(ln, { x: xLeft, y: cursorY, size, font, lineHeight:
+        page.drawText(ln, { x: xLeft, y: cursorY, size, font, lineHeight: lh, maxWidth });
+        cursorY -= lh;
+      }
+      cursorY -= extraAfter;
+    };
+
+    const drawBullet = (text) => {
+      const bulletSize = bodySize;
+      const bulletGap = 8;
+      const bulletCol = 10;
+      const xBullet = margin;
+      const xText = margin + bulletCol + bulletGap;
+
+      ensure(lineH);
+      page.drawText("•", { x: xBullet, y: cursorY, size: bulletSize, font });
+      drawWrappedAt(xText, text, bodySize, 4);
+    };
+
+    // Title: shrink-to-fit first, else wrap at min size with generous line-height
+    const drawTitle = (titleText) => {
+      const maxWidth = pageW - margin * 2;
+      const maxSize = 26;
+      const minSize = 14;
+
+      let size = maxSize;
+      while (size > minSize && widthOf(titleText, size) > maxWidth) size -= 1;
+
+      if (widthOf(titleText, size) <= maxWidth) {
+        ensure(size + 12);
+        page.drawText(titleText, { x: margin, y: cursorY, size, font, maxWidth });
+        cursorY -= (size + 18);
+      } else {
+        drawWrappedAt(margin, titleText, minSize, 14, minSize + 6);
+      }
+    };
+
+    // Draw title then ordered blocks
+    drawTitle(title);
+    for (const b of blocks) {
+      if (b.type === "bullet") drawBullet(b.text);
+      else drawWrappedAt(margin, b.text, bodySize, 10);
+    }
+
+    const outBytes = await out.save();
+    return bytesToDataUrl("application/pdf", outBytes);
+  }
+
+  // ---- Main handler ----
+  const handleProcess = async () => {
+    setError(""); setResults([]); setProgressDone(0); setOpenPreview({});
+    const urls = pdfUrls.split(/\n|,/).map(u => u.trim()).filter(Boolean);
+    if (!urls.length) { setError("Please enter at least one PDF URL."); return; }
+    if (!replaceNumber.trim()) { setError("Please enter the replacement phone number."); return; }
+
+    setProgressTotal(urls.length); setLoading(true);
+    const processed = [];
+
+    for (let i = 0; i < urls.length; i++) {
+      const url = urls[i];
+      try {
+        // CORS-safe via tiny proxy
+        const proxied = `/api/fetch?url=${encodeURIComponent(url)}`;
+        const r = await fetch(proxied);
+        if (!r.ok) throw new Error(`Fetch failed (${r.status})`);
+        const arrBuf = await r.arrayBuffer();
+
+        const downloadUrl =
+          layoutMode === "inplace"
+            ? await processInplaceClient(arrBuf, replaceNumber)
+            : await processPresentableClient(arrBuf, replaceNumber);
+
+        processed.push({
+          fileName: url.split("/").pop() || `file_${i + 1}.pdf`,
+          sourceUrl: url,
+          preview:
+            layoutMode === "inplace"
+              ? "In-place replacement (layout preserved)."
+              : "Heading safe; bullets in order; clean wrap.",
+          downloadUrl
+        });
+      } catch (e) {
+        processed.push({
+          fileName: url.split("/").pop() || `file_${i + 1}.pdf`,
+          sourceUrl: url,
+          error: e.message || String(e),
+        });
+      }
+      setProgressDone((prev) => prev + 1);
+    }
+
+    setResults(processed);
+    setLoading(false);
+  };
+
+  // ZIP download
+  const downloadAllZip = async () => {
+    const zip = new JSZip();
+    const folder = zip.folder("processed_pdfs");
+    results.forEach((r, idx) => {
+      if (!r.downloadUrl) return;
+      const base64 = r.downloadUrl.split(",")[1];
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const safe = (r.fileName || `file_${idx + 1}.pdf`).replace(/[^a-zA-Z0-9._-]/g, "_");
+      folder.file(safe, bytes);
+    });
+    const blob = await zip.generateAsync({ type: "blob" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "processed_pdfs.zip";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
+  return (
+    <div className="min-h-screen p-8">
+      <motion.h1 initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}
+        className="text-3xl font-bold mb-6 text-center text-blue-700">
+        📄 Smart PDF Replacer (Local Only)
+      </motion.h1>
+
+      {loading && (
+        <div className="max-w-3xl mx-auto mb-6">
+          <div className="w-full bg-gray-200 h-3 rounded">
+            <div className="h-3 bg-blue-600 rounded transition-all" style={{ width: `${percent}%` }} />
+          </div>
+          <div className="text-sm text-gray-600 mt-1">Processing {progressDone}/{progressTotal} files ({percent}%)</div>
+        </div>
+      )}
+
+      <div className="max-w-3xl mx-auto space-y-4 bg-white p-5 rounded-xl shadow">
+        <label className="block text-sm font-medium text-gray-700">PDF URLs (one per line)</label>
+        <textarea
+          value={pdfUrls}
+          onChange={(e) => setPdfUrls(e.target.value)}
+          placeholder={`https://example.com/file1.pdf
+https://example.com/file2.pdf`}
+          className="w-full p-3 border rounded" rows={6} />
+
+        <label className="block text-sm font-medium text-gray-700">Replacement phone number</label>
+        <input value={replaceNumber} onChange={(e) => setReplaceNumber(e.target.value)} placeholder="+1-999-111-2222" className="w-full p-3 border rounded" />
+
+        <div className="flex flex-wrap items-center gap-3 pt-2">
+          <select
+            value={layoutMode}
+            onChange={(e) => setLayoutMode(e.target.value)}
+            className="border px-3 py-2 rounded"
+            title="Choose output mode"
+          >
+            <option value="presentable">Presentable (safe title, bullets in order)</option>
+            <option value="inplace">Keep Layout (in-place overlay)</option>
+          </select>
+
+          <button
+            disabled={loading}
+            onClick={handleProcess}
+            className="bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700 disabled:opacity-60"
+          >
+            {loading ? "Processing…" : "Start Processing"}
+          </button>
+        </div>
+
+        {error && <div className="text-red-600 text-sm">{error}</div>}
+      </div>
+
+      {results.length > 0 && (
+        <div className="max-w-3xl mx-auto mt-10 space-y-6">
+          <div className="flex justify-end">
+            <button onClick={downloadAllZip} className="bg-emerald-600 text-white px-4 py-2 rounded hover:bg-emerald-700">
+              Download All (ZIP)
+            </button>
+          </div>
+
+          {results.map((r, i) => (
+            <div key={i} className="border p-4 rounded bg-white shadow-sm">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="font-semibold text-lg truncate">{r.fileName || `File ${i + 1}`}</h3>
+                <div className="flex items-center gap-3">
+                  {r.downloadUrl && (
+                    <>
+                      <button onClick={() => togglePreview(i)} className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 text-sm">
+                        {openPreview[i] ? "Hide Preview" : "Preview"}
+                      </button>
+                      <a href={r.downloadUrl} download className="text-blue-600 underline">Download PDF</a>
+                    </>
+                  )}
+                </div>
+              </div>
+              <p className="text-xs text-gray-500 mt-1 break-all">Source: {r.sourceUrl || "—"}</p>
+              {r.error && <p className="text-red-600 mt-2">Error: {r.error}</p>}
+              {openPreview[i] && r.downloadUrl && (
+                <div className="mt-3">
+                  <iframe src={r.downloadUrl} title={`preview-${i}`} className="w-full h-[480px] border rounded" />
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

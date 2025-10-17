@@ -33,11 +33,9 @@ function normalizeWeird(text) {
 
 // ---- PDF.js helpers (client) ----
 async function loadPdfJs() {
-  // Use LEGACY build to avoid ESM remote worker hassles
-  const pdfjs = (await import("pdfjs-dist/legacy/build/pdf")).default ?? await import("pdfjs-dist/legacy/build/pdf");
-  if (pdfjs.GlobalWorkerOptions) {
-    pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.js"; // served from /public by postinstall copy
-  }
+  // Legacy build; we do NOT set workerSrc and always call getDocument with { disableWorker: true }
+  const mod = await import("pdfjs-dist/legacy/build/pdf");
+  const pdfjs = mod.default?.getDocument ? mod.default : mod;
   return pdfjs;
 }
 

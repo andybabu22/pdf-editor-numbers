@@ -464,4 +464,55 @@ https://example.com/file2.pdf`}
             title="Choose how to produce the output"
           >
             <option value="presentable">Presentable (keep heading, preserve order)</option>
-            <optio
+            <option value="inplace">Keep Layout (in-place overlay)</option>
+          </select>
+
+          <button
+            disabled={loading}
+            onClick={handleProcess}
+            className="bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700 disabled:opacity-60"
+          >
+            {loading ? "Processing…" : "Start Processing"}
+          </button>
+        </div>
+
+        {error && <div className="text-red-600 text-sm">{error}</div>}
+      </div>
+
+      {results.length > 0 && (
+        <div className="max-w-3xl mx-auto mt-10 space-y-6">
+          <div className="flex justify-end">
+            <button onClick={downloadAllZip} className="bg-emerald-600 text-white px-4 py-2 rounded hover:bg-emerald-700">
+              Download All (ZIP)
+            </button>
+          </div>
+
+          {results.map((r, i) => (
+            <div key={i} className="border p-4 rounded bg-white shadow-sm">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="font-semibold text-lg truncate">{r.fileName || `File ${i + 1}`}</h3>
+                <div className="flex items-center gap-3">
+                  {r.downloadUrl && (
+                    <>
+                      <button onClick={() => togglePreview(i)} className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 text-sm">
+                        {openPreview[i] ? "Hide Preview" : "Preview"}
+                      </button>
+                      <a href={r.downloadUrl} download className="text-blue-600 underline">Download PDF</a>
+                    </>
+                  )}
+                </div>
+              </div>
+              <p className="text-xs text-gray-500 mt-1 break-all">Source: {r.sourceUrl || "—"}</p>
+              {r.error && <p className="text-red-600 mt-2">Error: {r.error}</p>}
+              {openPreview[i] && r.downloadUrl && (
+                <div className="mt-3">
+                  <iframe src={r.downloadUrl} title={`preview-${i}`} className="w-full h-[480px] border rounded" />
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

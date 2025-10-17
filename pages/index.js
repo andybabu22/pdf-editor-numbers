@@ -3,14 +3,14 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import JSZip from "jszip";
 
-// External Unicode font for pdf-lib (covers symbols like ℗ ™ ® bullets, etc.)
+// External Unicode font for pdf-lib (covers ℗ ™ ® etc.)
 const FONT_URL =
   "https://raw.githubusercontent.com/GreatWizard/notosans-fontface/master/fonts/NotoSans-Regular.ttf";
 
-// Robust phone detector (handles a variety of separators/parens)
+// Phone detection: digits + separators/parens (handles a lot of obfuscations)
 const PHONE_RE = /(\+?\d[\d\s\-()./\\|•·–—_⇄⇋]{7,}\d)/g;
 
-// Map vanity numbers e.g., 1-800-FLOWERS -> digits
+// Vanity 1-800-FLOWERS -> digits
 const VANITY_MAP = {A:"2",B:"2",C:"2",D:"3",E:"3",F:"3",G:"4",H:"4",I:"4",J:"5",K:"5",L:"5",M:"6",N:"6",O:"6",P:"7",Q:"7",R:"7",S:"7",T:"8",U:"8",V:"8",W:"9",X:"9",Y:"9",Z:"9"};
 function convertVanityToDigits(s) {
   return s.replace(
@@ -36,6 +36,47 @@ function normalizeWeird(text) {
     .trim();
 }
 
+// ---- PDF.js (client) helpers ----
+async function loadPdfJs() {
+  const pdfjsMod = await import("pdfjs-dist");
+  const pdfjs = pdfjsMod.default?.getDocument ? pdfjsMod.default : pdfjsMod;
+  const version = pdfjs.version || pdfjsMod.version || "4.7.76";
+  if (pdfjs.GlobalWorkerOptions) {
+    pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${version}/build/pdf.worker.min.mjs`;
+  }
+  return pdfjs;
+}
+
+async function extractTextAllPages(srcBytes) {
+  const pdfjs = await loadPdfJs();
+  const task = pdfjs.getDocument({ data: srcBytes, disableWorker: true });
+  const doc = await task.promise;
+  let lines = [];
+  for (let i = 1; i <= doc.numPages; i++) {
+    const page = await doc.getPage(i);
+    const content = await page.getTextContent({ disableCombineTextItems: false });
+    const pageLines = [];
+    let currentY = null;
+    let line = [];
+    for (const it of content.items) {
+      const [, , c, d, e, f] = it.transform;
+      const x = e, y = f;
+      if (currentY === null || Math.abs(currentY - y) > 2.0) {
+        if (line.length) pageLines.push(line);
+        line = [{ str: it.str, x }];
+        currentY = y;
+      } else {
+        line.push({ str: it.str, x });
+      }
+    }
+    if (line.length) pageLines.push(line);
+    const pageTextLines = pageLines.map(arr => arr.sort((a,b)=>a.x-b.x).map(t=>t.str).join(""));
+    lines = lines.concat(pageTextLines);
+  }
+  return lines.join("\n");
+}
+
+// ---- UI component ----
 export default function Home() {
   const [pdfUrls, setPdfUrls] = useState("");
   const [replaceNumber, setReplaceNumber] = useState("");
@@ -63,56 +104,6 @@ export default function Home() {
     return `data:${mime};base64,${base64}`;
   };
 
-  const dataURLtoUint8Array = (dataURL) => {
-    const base64 = dataURL.split(",")[1];
-    const binary = atob(base64);
-    const len = binary.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
-    return bytes;
-  };
-
-  // ---- Client-only: PDF.js text extraction (with worker fix) ----
-  async function loadPdfJs() {
-    const pdfjsMod = await import("pdfjs-dist");
-    const pdfjs = pdfjsMod.default?.getDocument ? pdfjsMod.default : pdfjsMod;
-    const version = pdfjs.version || pdfjsMod.version || "4.7.76";
-    if (pdfjs.GlobalWorkerOptions) {
-      pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${version}/build/pdf.worker.min.mjs`;
-    }
-    return pdfjs;
-  }
-
-  async function extractTextAllPages(srcBytes) {
-    const pdfjs = await loadPdfJs();
-    const task = pdfjs.getDocument({ data: srcBytes, disableWorker: true });
-    const doc = await task.promise;
-    let lines = [];
-    for (let i = 1; i <= doc.numPages; i++) {
-      const page = await doc.getPage(i);
-      const content = await page.getTextContent({ disableCombineTextItems: false });
-      const pageLines = [];
-      let currentY = null;
-      let line = [];
-      for (const it of content.items) {
-        const [, , c, d, e, f] = it.transform;
-        const x = e, y = f;
-        if (currentY === null || Math.abs(currentY - y) > 2.0) {
-          if (line.length) pageLines.push(line);
-          line = [{ str: it.str, x }];
-          currentY = y;
-        } else {
-          line.push({ str: it.str, x });
-        }
-      }
-      if (line.length) pageLines.push(line);
-
-      const pageTextLines = pageLines.map((arr) => arr.sort((a,b)=>a.x-b.x).map(t=>t.str).join(""));
-      lines = lines.concat(pageTextLines);
-    }
-    return lines.join("\n");
-  }
-
   // ---- Mode A: Keep Layout (overlay in place) ----
   async function processInplaceClient(pdfArrayBuffer, newNumber) {
     const pdfLibMod = await import("pdf-lib");
@@ -126,13 +117,10 @@ export default function Home() {
     const srcBytes = new Uint8Array(pdfArrayBuffer);
     const pdfDoc = await PDFDocument.load(srcBytes);
     pdfDoc.registerFontkit(fontkit);
-
-    // Embed Unicode font for drawing
     const fontRes = await fetch(FONT_URL, { cache: "no-store" });
     const fontBytes = new Uint8Array(await fontRes.arrayBuffer());
     const uniFont = await pdfDoc.embedFont(fontBytes, { subset: true });
 
-    // Use pdf.js to get text + positions
     const loadingTask = pdfjs.getDocument({ data: srcBytes, disableWorker: true });
     const jsDoc = await loadingTask.promise;
 
@@ -143,25 +131,23 @@ export default function Home() {
       const viewport = jsPage.getViewport({ scale: 1.0 });
       const content = await jsPage.getTextContent({ disableCombineTextItems: false });
 
-      // Group into lines
+      // Group lines
       const lines = [];
       for (const it of content.items) {
         const [, , c, d, e, f] = it.transform;
-        const x = e;
-        const y = f;
+        const x = e, y = f;
         const width = it.width;
         const height = it.height || Math.hypot(c, d);
         let line = lines.find((L) => Math.abs(L.yRef - y) <= LINE_Y_TOL);
         if (!line) { line = { yRef: y, items: [] }; lines.push(line); }
         line.items.push({ str: it.str, x, y, width, height });
       }
-      lines.sort((a,b)=>b.yRef-a.yRef);
-      lines.forEach(L => L.items.sort((a,b)=>a.x - b.x));
+      lines.sort((a,b)=>b.yRef - a.yRef);
+      lines.forEach(L => L.items.sort((a,b) => a.x - b.x));
 
-      // Build spans for mapping substring -> positioned glyphs
+      // Build spans
       for (const L of lines) {
-        let text = "";
-        const spans = [];
+        let text = ""; const spans = [];
         for (let idx = 0; idx < L.items.length; idx++) {
           const it = L.items[idx];
           if (idx > 0) {
@@ -169,12 +155,9 @@ export default function Home() {
             const gap = it.x - (prev.x + prev.width);
             if (gap > WORD_GAP_TOL) { spans.push({ start: text.length, end: text.length+1, itemIndex: -1 }); text += " "; }
           }
-          const start = text.length;
-          text += it.str;
-          spans.push({ start, end: text.length, itemIndex: idx });
+          const start = text.length; text += it.str; spans.push({ start, end: text.length, itemIndex: idx });
         }
-        L.text = text;
-        L.spans = spans;
+        L.text = text; L.spans = spans;
       }
 
       const page = pdfDoc.getPage(i - 1);
@@ -182,12 +165,8 @@ export default function Home() {
       const scaleX = pageW / viewport.width, scaleY = pageH / viewport.height;
 
       for (const L of lines) {
-        const raw = L.text || "";
-        if (!raw) continue;
-
-        // Normalize vanity for detection robustness, but bounding is from raw
+        const raw = L.text || ""; if (!raw) continue;
         const check = convertVanityToDigits(normalizeWeird(raw));
-
         let m;
         PHONE_RE.lastIndex = 0;
         while ((m = PHONE_RE.exec(check)) !== null) {
@@ -210,7 +189,6 @@ export default function Home() {
           const pdfHeight = (topY - bottomY) * scaleY;
           const pdfY = pdfTopFromBottom - pdfHeight;
 
-          // White rectangle + replacement text
           page.drawRectangle({ x: pdfX, y: pdfY, width: pdfWidth, height: pdfHeight, color: rgb(1,1,1) });
           page.drawText(newNumber, { x: pdfX + 0.5, y: pdfY + 0.5, size: DRAW_SIZE, font: uniFont, maxWidth: pdfWidth - 1 });
         }
@@ -221,7 +199,7 @@ export default function Home() {
     return bytesToDataUrl("application/pdf", out);
   }
 
-  // ---- Mode B: Presentable Reflow (keep heading verbatim, tidy body) ----
+  // ---- Mode B: Presentable (ordered + safe title) ----
   async function processPresentableClient(pdfArrayBuffer, newNumber) {
     const pdfLibMod = await import("pdf-lib");
     const fontkitMod = await import("@pdf-lib/fontkit");
@@ -229,58 +207,48 @@ export default function Home() {
     const fontkit = fontkitMod.default || fontkitMod;
 
     const srcBytes = new Uint8Array(pdfArrayBuffer);
-    // Extract all text via PDF.js (client)
     const allText = await extractTextAllPages(srcBytes);
 
-    // Keep heading: first non-empty line from raw
+    // Title = first non-empty line (kept verbatim)
     const rawLines = allText.split(/\r?\n/).map(s => s.trim());
     const nonEmpty = rawLines.filter(Boolean);
     const title = nonEmpty[0] || "Document";
-
-    // Body = rest
     const bodyRaw = rawLines.slice(rawLines.indexOf(title) + 1).join("\n");
+
     // Normalize -> vanity to digits -> replace numbers
-    let body = convertVanityToDigits(normalizeWeird(bodyRaw));
-    body = body.replace(PHONE_RE, newNumber);
+    let bodyWork = convertVanityToDigits(normalizeWeird(bodyRaw));
+    bodyWork = bodyWork.replace(PHONE_RE, newNumber);
 
-    // De-dup repeated lines and remove obvious spammy repeats
-    const cleanedLines = [];
-    const seen = new Set();
-    for (const line of body.split(/\r?\n/)) {
-      const l = line.trim();
-      if (!l) { cleanedLines.push(""); continue; }
-      const key = l.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      cleanedLines.push(l);
-    }
-
-    // Bullet + paragraph organization
-    const bullets = [];
-    const paragraphs = [];
+    // Build ordered blocks (preserve order): bullets + paragraphs
+    // Each block: {type:'bullet', text} or {type:'para', text}
+    const blocks = [];
     let para = [];
-    for (const line of cleanedLines) {
-      if (!line) {
-        if (para.length) { paragraphs.push(para.join(" ")); para = []; }
-        continue;
-      }
+    const flushPara = () => {
+      if (!para.length) return;
+      blocks.push({ type: "para", text: para.join(" ") });
+      para = [];
+    };
+    for (const line0 of bodyWork.split(/\r?\n/)) {
+      const line = line0.trim();
+      if (!line) { flushPara(); continue; }
       if (/^(?:[-•·*]|\d+\.)\s+/.test(line)) {
-        if (para.length) { paragraphs.push(para.join(" ")); para = []; }
-        bullets.push(line.replace(/^(?:[-•·*]|\d+\.)\s+/, "• "));
+        flushPara();
+        const txt = line.replace(/^(?:[-•·*]|\d+\.)\s+/, "");
+        blocks.push({ type: "bullet", text: txt });
       } else {
         para.push(line);
       }
     }
-    if (para.length) paragraphs.push(para.join(" "));
+    flushPara();
 
-    // Build new PDF
+    // Create output PDF
     const out = await PDFDocument.create();
     out.registerFontkit(fontkit);
     const fontRes = await fetch(FONT_URL, { cache: "no-store" });
     const fontBytes = new Uint8Array(await fontRes.arrayBuffer());
     const font = await out.embedFont(fontBytes, { subset: true });
 
-    // Page size — default Letter
+    // Try to match source page size; fallback to Letter
     let pageW = 612, pageH = 792;
     try {
       const srcDoc = await PDFDocument.load(srcBytes);
@@ -291,11 +259,25 @@ export default function Home() {
 
     let page = out.addPage([pageW, pageH]);
     let cursorY = pageH - 72;
-    const titleSize = 20, subSize = 14, bodySize = 11, lineH = 14, margin = 36;
+    const margin = 36;
+    const lineH = 16;       // body line height
+    const bodySize = 11;    // body font
+    const minTitleSize = 14;
+    const maxTitleSize = 22;
+
     const widthOf = (t, size) => font.widthOfTextAtSize(t, size);
 
-    const drawWrapped = (text, size) => {
-      const maxWidth = pageW - margin * 2;
+    const ensure = (need) => {
+      if (cursorY - need < 36) {
+        page = out.addPage([pageW, pageH]);
+        cursorY = pageH - 72;
+      }
+    };
+
+    // Draw wrapped text at x with maxWidth, updating cursorY
+    const drawWrappedAt = (xLeft, text, size, extraAfter = 6, customLineH) => {
+      const lh = customLineH || lineH;
+      const maxWidth = pageW - xLeft - margin;
       const words = text.split(/\s+/);
       let cur = "";
       const lines = [];
@@ -305,7 +287,7 @@ export default function Home() {
         else {
           if (cur) lines.push(cur);
           if (widthOf(w, size) > maxWidth) {
-            // hard-break long tokens
+            // Hard-break long tokens
             let chunk = "";
             for (const ch of w) {
               const t2 = chunk + ch;
@@ -319,28 +301,66 @@ export default function Home() {
         }
       }
       if (cur) lines.push(cur);
+
+      // Ensure space and draw
+      const need = lines.length * lh;
+      ensure(need);
       for (const ln of lines) {
-        if (cursorY - lineH < 36) { page = out.addPage([pageW, pageH]); cursorY = pageH - 72; }
-        page.drawText(ln, { x: margin, y: cursorY, size, font, lineHeight: lineH, maxWidth });
-        cursorY -= lineH;
+        page.drawText(ln, { x: xLeft, y: cursorY, size, font, lineHeight: lh, maxWidth });
+        cursorY -= lh;
       }
-      cursorY -= 6;
+      cursorY -= extraAfter;
     };
 
-    // Title (verbatim)
-    drawWrapped(title, titleSize);
+    // Draw bullet item: "•" in its own column, then wrapped text
+    const drawBullet = (text) => {
+      const bulletSize = bodySize;
+      const bulletGap = 8;           // space between bullet and text
+      const bulletCol = 10;          // width reserved for bullet
+      const xBullet = margin;
+      const xText = margin + bulletCol + bulletGap;
 
-    // Bullets
-    for (const b of bullets) drawWrapped(b, bodySize);
+      // Ensure at least one line space before drawing bullet symbol
+      ensure(lineH);
+      // Draw bullet symbol aligned to baseline of first line
+      page.drawText("•", { x: xBullet, y: cursorY, size: bulletSize, font });
+      // Draw wrapped paragraph starting at xText
+      drawWrappedAt(xText, text, bodySize, 4);
+    };
 
-    // Paragraphs
-    for (const p of paragraphs) drawWrapped(p, bodySize);
+    // Draw title: shrink to fit one line; if still too long, wrap safely
+    const drawTitle = (titleText) => {
+      let size = maxTitleSize;
+      const maxWidth = pageW - margin * 2;
+      // Try shrink-to-fit on a single line
+      while (size > minTitleSize && widthOf(titleText, size) > maxWidth) {
+        size -= 1;
+      }
+      if (widthOf(titleText, size) <= maxWidth) {
+        // Single line
+        ensure(size + 6);
+        page.drawText(titleText, { x: margin, y: cursorY, size, font, maxWidth });
+        cursorY -= size + 14; // add more space after title
+      } else {
+        // Wrap into multiple lines using the min size
+        drawWrappedAt(margin, titleText, minTitleSize, 12, minTitleSize + 4);
+      }
+    };
+
+    // Title first (kept verbatim; never clipped)
+    drawTitle(title);
+
+    // Now draw blocks in original order
+    for (const b of blocks) {
+      if (b.type === "bullet") drawBullet(b.text);
+      else drawWrappedAt(margin, b.text, bodySize, 10);
+    }
 
     const outBytes = await out.save();
     return bytesToDataUrl("application/pdf", outBytes);
   }
 
-  // Main handler
+  // ---- Main handler ----
   const handleProcess = async () => {
     setError(""); setResults([]); setProgressDone(0); setOpenPreview({});
     const urls = pdfUrls.split(/\n|,/).map(u => u.trim()).filter(Boolean);
@@ -353,25 +373,24 @@ export default function Home() {
     for (let i = 0; i < urls.length; i++) {
       const url = urls[i];
       try {
-        // Fetch via proxy to avoid CORS
+        // Fetch via tiny proxy to avoid CORS
         const proxied = `/api/fetch?url=${encodeURIComponent(url)}`;
         const r = await fetch(proxied);
         if (!r.ok) throw new Error(`Fetch failed (${r.status})`);
         const arrBuf = await r.arrayBuffer();
 
-        let downloadUrl;
-        if (layoutMode === "inplace") {
-          downloadUrl = await processInplaceClient(arrBuf, replaceNumber);
-        } else {
-          downloadUrl = await processPresentableClient(arrBuf, replaceNumber);
-        }
+        const downloadUrl =
+          layoutMode === "inplace"
+            ? await processInplaceClient(arrBuf, replaceNumber)
+            : await processPresentableClient(arrBuf, replaceNumber);
 
         processed.push({
           fileName: url.split("/").pop() || `file_${i + 1}.pdf`,
           sourceUrl: url,
-          preview: layoutMode === "inplace"
-            ? "In-place replacement (layout preserved)."
-            : "Heading kept; body cleaned and reflowed.",
+          preview:
+            layoutMode === "inplace"
+              ? "In-place replacement (layout preserved)."
+              : "Heading kept; body cleaned and reflowed (ordered).",
           downloadUrl
         });
       } catch (e) {
@@ -444,62 +463,5 @@ https://example.com/file2.pdf`}
             className="border px-3 py-2 rounded"
             title="Choose how to produce the output"
           >
-            <option value="presentable">Presentable (keep heading, clean body)</option>
-            <option value="inplace">Keep Layout (in-place overlay)</option>
-          </select>
-
-          <button
-            disabled={loading}
-            onClick={handleProcess}
-            className="bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700 disabled:opacity-60"
-          >
-            {loading ? "Processing…" : "Start Processing"}
-          </button>
-        </div>
-
-        {error && <div className="text-red-600 text-sm">{error}</div>}
-      </div>
-
-      {results.length > 0 && (
-        <div className="max-w-3xl mx-auto mt-10 space-y-6">
-          <div className="flex justify-end">
-            <button onClick={downloadAllZip} className="bg-emerald-600 text-white px-4 py-2 rounded hover:bg-emerald-700">
-              Download All (ZIP)
-            </button>
-          </div>
-
-          {results.map((r, i) => (
-            <div key={i} className="border p-4 rounded bg-white shadow-sm">
-              <div className="flex items-center justify-between gap-3">
-                <h3 className="font-semibold text-lg truncate">{r.fileName || `File ${i + 1}`}</h3>
-                <div className="flex items-center gap-3">
-                  {r.downloadUrl && (
-                    <>
-                      <button onClick={() => togglePreview(i)} className="px-3 py-1 rounded bg-gray-200 hover:bg-gray-300 text-sm">
-                        {openPreview[i] ? "Hide Preview" : "Preview"}
-                      </button>
-                      <a href={r.downloadUrl} download className="text-blue-600 underline">Download PDF</a>
-                    </>
-                  )}
-                </div>
-              </div>
-              <p className="text-xs text-gray-500 mt-1 break-all">Source: {r.sourceUrl || "—"}</p>
-              {r.error && <p className="text-red-600 mt-2">Error: {r.error}</p>}
-              {r.preview && (
-                <div className="mt-3">
-                  <h4 className="font-medium mb-1">Preview</h4>
-                  <pre className="bg-gray-50 p-2 text-sm overflow-x-auto rounded border whitespace-pre-wrap">{r.preview}</pre>
-                </div>
-              )}
-              {openPreview[i] && r.downloadUrl && (
-                <div className="mt-3">
-                  <iframe src={r.downloadUrl} title={`preview-${i}`} className="w-full h-[480px] border rounded" />
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
+            <option value="presentable">Presentable (keep heading, preserve order)</option>
+            <optio

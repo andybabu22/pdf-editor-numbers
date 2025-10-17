@@ -1,0 +1,23 @@
+{
+  "name": "smart-pdf-replacer-local",
+  "version": "2.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@pdf-lib/fontkit": "^1.1.1",
+    "autoprefixer": "^10.4.17",
+    "framer-motion": "^11.0.0",
+    "jszip": "^3.10.1",
+    "next": "^14.2.0",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^4.7.76",
+    "postcss": "^8.4.31",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "tailwindcss": "^3.4.3"
+  }
+}
